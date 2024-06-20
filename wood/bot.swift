@@ -40,6 +40,10 @@ struct SampleData {
     var costC: Int
     var costD: Int
     var costE: Int
+
+    var totalCost: Int {
+        costA + costB + costC + costD + costE
+    }
 }
 
 struct Inventory {
@@ -52,7 +56,6 @@ struct Inventory {
     var samples: [SampleData] = []
 
     mutating func set(a: Int, b: Int, c: Int, d: Int, e: Int) {
-        errStream.write("\(a) \(b) \(c) \(d) \(e)\n")
         molecules[0] = a
         molecules[1] = b
         molecules[2] = c
@@ -102,19 +105,55 @@ class Bot {
     }
 
     func update(samples: [SampleData]) {
-        // Check if we already have a sample, else we need to check if we are already at the diagnosis.
-        // We have a sample
-        if let sample = samples.first(where: { $0.location == .me }) {
-            // Check if we still need to gather molecules
+        let ownedSamples = samples.filter { $0.location == .me }
+        inventory.samples = ownedSamples
 
-            if canProcessSample(sample: sample) {
-                processSample(sample: sample)
+        // If we are already at the lab we keep processing
+        if position == .laboratory {
+            for sample in ownedSamples {
+                if canProcessSample(sample: sample) {
+                    processSample(sample: sample)
+                    return
+                }
+            }
+
+            if ownedSamples.isEmpty {
+                // Take new samples
+                move(to: .diagnosis)
             } else {
-                collectMolecules(for: sample)
+                // Somehow we went to processing but didnt have enough molecules. Go to molecules as a fallback
+                move(to: .molecules)
             }
         } else {
-            collectSample(samples: samples)
+            // We can take more samples as we found matching ones
+            if queryNextSample(samples: samples) != nil {
+                collectSamples(samples: samples)
+            } else {
+                if !canProcessSamples(samples: ownedSamples) {
+                    errStream.write("\(inventory.molecules)")
+                    takeMolecule(kind: getMissingMolecule(samples: ownedSamples))
+                } else {
+                    processSample(sample: ownedSamples.first!)
+                }
+            }
         }
+    }
+
+    // Gets he best available sample of the ones not claimed(total cost, available molecules later etc). Nil if already 3 samples in inventory, or when no other best match found
+    private func queryNextSample(samples: [SampleData]) -> SampleData? {
+        if inventory.samples.count == 3 {
+            return nil
+        }
+
+        if let bestMatching = samples.sorted { $0.totalCost > $1.totalCost }.last(where: { $0.location == .cloud }) {
+            let inventorySize = inventory.samples.reduce(0, { $0 + $1.totalCost} )
+
+            if inventorySize + bestMatching.totalCost <= 10 {
+                return bestMatching
+            }
+        }
+
+        return nil
     }
 
     private func processSample(sample: SampleData) {
@@ -125,6 +164,46 @@ class Bot {
         }
     }
 
+    private func canProcessSamples(samples: [SampleData]) -> Bool {
+        samples.map { 
+            inventory[Molecule.Kind.a]! >= $0.costA &&
+            inventory[Molecule.Kind.b]! >= $0.costB &&
+            inventory[Molecule.Kind.c]! >= $0.costC &&
+            inventory[Molecule.Kind.d]! >= $0.costD &&
+            inventory[Molecule.Kind.e]! >= $0.costE
+        }.reduce(true, { $0 && $1 })
+    } 
+
+    private func getMissingMolecule(samples: [SampleData]) -> Molecule.Kind {
+        var totalA = samples.reduce(0, { $0 + $1.costA })
+        var totalB = samples.reduce(0, { $0 + $1.costB })
+        var totalC = samples.reduce(0, { $0 + $1.costC })
+        var totalD = samples.reduce(0, { $0 + $1.costD })
+        var totalE = samples.reduce(0, { $0 + $1.costE })
+
+        if totalA > inventory[Molecule.Kind.a]! {
+            return .a
+        }
+
+        if totalB > inventory[Molecule.Kind.b]! {
+            return .b
+        }
+
+        if totalC > inventory[Molecule.Kind.c]! {
+            return .c
+        }
+
+        if totalD > inventory[Molecule.Kind.d]! {
+            return .d
+        }
+
+        if totalE > inventory[Molecule.Kind.e]! {
+            return .e
+        }
+
+        return .a
+    }
+
     private func canProcessSample(sample: SampleData) -> Bool {
         inventory[Molecule.Kind.a]! >= sample.costA &&
         inventory[Molecule.Kind.b]! >= sample.costB &&
@@ -133,16 +212,13 @@ class Bot {
         inventory[Molecule.Kind.e]! >= sample.costE
     } 
 
-    private func collectSample(samples: [SampleData]) {
-        if let sample = samples.last(where: { $0.location == .cloud }) {
+    private func collectSamples(samples: [SampleData]) {
+        if let nextSample = queryNextSample(samples: samples) {
             if position != .diagnosis {
                 move(to: .diagnosis)
             } else {
-                connect(value: sample.id)
+                connect(value: nextSample.id)
             }
-        } else {
-            print("PANIC")
-            // Do nothing?
         }
     }
 
@@ -165,8 +241,12 @@ class Bot {
     }
 
     private func takeMolecule(kind: Molecule.Kind) {
-        inventory[kind]! += 1
-        connect(value: kind.rawValue)
+        if position != .molecules {
+            move(to: .molecules)
+        } else {
+            inventory[kind]! += 1
+            connect(value: kind.rawValue)
+        }
     }
 
     private func connect(value: Int) {
